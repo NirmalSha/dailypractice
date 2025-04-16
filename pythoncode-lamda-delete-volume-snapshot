@@ -1,0 +1,61 @@
+import boto3
+
+ec2 = boto3.client('ec2')
+
+def lambda_handler(event, context):
+    # Step 1: Get attached volumes from running EC2 instances
+    running_instances = ec2.describe_instances(
+        Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+    )
+
+    attached_volume_ids = set()
+
+    for reservation in running_instances['Reservations']:
+        for instance in reservation['Instances']:
+            for mapping in instance.get('BlockDeviceMappings', []):
+                volume_id = mapping.get('Ebs', {}).get('VolumeId')
+                if volume_id:
+                    attached_volume_ids.add(volume_id)
+
+    print(f"Attached volume IDs: {attached_volume_ids}")
+
+    # Step 2: Delete snapshots not tied to these volumes
+    snapshots = ec2.describe_snapshots(OwnerIds=['self'])['Snapshots']
+    deleted_snapshots = []
+
+    for snapshot in snapshots:
+        volume_id = snapshot.get('VolumeId')
+        snapshot_id = snapshot['SnapshotId']
+
+        if volume_id and volume_id not in attached_volume_ids:
+            try:
+                ec2.delete_snapshot(SnapshotId=snapshot_id)
+                deleted_snapshots.append(snapshot_id)
+                print(f"Deleted snapshot {snapshot_id} from volume {volume_id}")
+            except Exception as e:
+                print(f"Failed to delete snapshot {snapshot_id}: {e}")
+
+    # Step 3: Delete volumes not in use
+    volumes = ec2.describe_volumes()['Volumes']
+    deleted_volumes = []
+
+    for volume in volumes:
+        volume_id = volume['VolumeId']
+        state = volume['State']
+        attachments = volume.get('Attachments', [])
+
+        if state == 'available' and not attachments:
+            try:
+                ec2.delete_volume(VolumeId=volume_id)
+                deleted_volumes.append(volume_id)
+                print(f"Deleted unused volume: {volume_id}")
+            except Exception as e:
+                print(f"Failed to delete volume {volume_id}: {e}")
+
+    return {
+        'statusCode': 200,
+        'body': {
+            'deleted_snapshots': deleted_snapshots,
+            'deleted_volumes': deleted_volumes
+        }
+    }
